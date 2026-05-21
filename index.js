@@ -3,6 +3,7 @@ const dotenv = require('dotenv');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 dotenv.config();
@@ -461,6 +462,244 @@ async function start() {
 
   app.delete('/rooms/:id', authMiddleware, deleteRoomHandler);
   app.delete('/api/rooms/:id', authMiddleware, deleteRoomHandler);
+
+  app.post('/auth/register', asyncHandler(async (req, res) => {
+    const { name, email, password, photoURL } = req.body;
+    const nameValue = typeof name === 'string' ? name.trim() : '';
+    const emailValue = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const passwordValue = typeof password === 'string' ? password : '';
+    const photoValue = typeof photoURL === 'string' ? photoURL.trim() : '';
+
+    if (!nameValue || !emailValue || !passwordValue) {
+      return res
+        .status(400)
+        .send({ message: 'Name, email, and password are required.' });
+    }
+    const passwordError = validatePasswordRules(passwordValue);
+    if (passwordError) {
+      return res.status(400).send({ message: passwordError });
+    }
+
+    const existingUser = await usersCollection.findOne({ email: emailValue });
+    if (existingUser) {
+      if (!hasPasswordHash(existingUser)) {
+        const passwordHash = await bcrypt.hash(passwordValue, 10);
+        const linkUpdates = { passwordHash, updatedAt: new Date() };
+        if (nameValue && (!existingUser.name || existingUser.name === 'Google User')) {
+          linkUpdates.name = nameValue;
+        }
+        if (!existingUser.photoURL) {
+          linkUpdates.photoURL = photoValue;
+        }
+        await usersCollection.updateOne(
+          { _id: existingUser._id },
+          { $set: linkUpdates }
+        );
+        return res.status(200).send({
+          message: 'Password linked. Please login.',
+          linked: true,
+        });
+      }
+      return res.status(409).send({ message: 'Email already registered.' });
+    }
+
+    const passwordHash = await bcrypt.hash(passwordValue, 10);
+    const newUser = {
+      name: nameValue,
+      email: emailValue,
+      photoURL: photoValue || null,
+      passwordHash,
+      bookings: [],
+      createdAt: new Date(),
+    };
+
+    await usersCollection.insertOne(newUser);
+    res.status(201).send({ message: 'Registration successful! Please login.' });
+  }));
+
+  app.post('/auth/login', asyncHandler(async (req, res) => {
+    const { email, password } = req.body;
+    const emailValue = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const passwordValue = typeof password === 'string' ? password : '';
+
+    if (!emailValue || !passwordValue) {
+      return res
+        .status(400)
+        .send({ message: 'Email and password are required.' });
+    }
+
+    const user = await usersCollection.findOne({ email: emailValue });
+    if (!user) {
+      return res.status(401).send({ message: 'Invalid credentials.' });
+    }
+
+    if (!hasPasswordHash(user)) {
+      return res.status(401).send({
+        code: 'GOOGLE_ONLY',
+        message:
+          'No password on this account. Use Continue with Google, or add one on Register with this email.',
+      });
+    }
+
+    const isValid = await bcrypt.compare(passwordValue, user.passwordHash);
+    if (!isValid) {
+      return res.status(401).send({ message: 'Invalid credentials.' });
+    }
+
+    setAuthCookie(res, user);
+    res.send(sanitizeUser(user));
+  }));
+
+  app.post('/auth/logout', (req, res) => {
+    clearAuthCookie(res);
+    res.send({ message: 'Logged out' });
+  });
+
+  app.post('/auth/google', asyncHandler(async (req, res) => {
+    const { name, email, photoURL, uid } = req.body;
+    const emailValue = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const nameValue = typeof name === 'string' && name.trim() ? name.trim() : '';
+    const photoValue = typeof photoURL === 'string' && photoURL.trim() ? photoURL.trim() : '';
+
+    if (!emailValue) {
+      return res.status(400).send({ message: 'Email is required.' });
+    }
+    const normalizedEmail = emailValue;
+
+    try {
+      let existing = await usersCollection.findOne({ email: normalizedEmail });
+      if (existing) {
+        const linkUpdates = { updatedAt: new Date() };
+        if (uid && !existing.googleUid) {
+          linkUpdates.googleUid = uid;
+        }
+        if (photoValue && !existing.photoURL) {
+          linkUpdates.photoURL = photoValue;
+        }
+        if (nameValue && (!existing.name || existing.name === 'Google User')) {
+          linkUpdates.name = nameValue;
+        }
+        if (Object.keys(linkUpdates).length > 1) {
+          await usersCollection.updateOne(
+            { _id: existing._id },
+            { $set: linkUpdates }
+          );
+          existing = await usersCollection.findOne({ _id: existing._id });
+        }
+        setAuthCookie(res, existing);
+        return res.send(sanitizeUser(existing));
+      }
+
+      const newUser = {
+        name: nameValue || 'Google User',
+        email: normalizedEmail,
+        photoURL: photoValue || null,
+        googleUid: uid || null,
+        bookings: [],
+        createdAt: new Date(),
+      };
+
+      const result = await usersCollection.insertOne(newUser);
+      const user = { ...newUser, _id: result.insertedId };
+
+      setAuthCookie(res, user);
+      return res.send(sanitizeUser(user));
+    } catch (err) {
+      if (err?.code === 11000) {
+        let existing = await usersCollection.findOne({ email: normalizedEmail });
+        if (existing) {
+          const linkUpdates = { updatedAt: new Date() };
+          if (uid && !existing.googleUid) linkUpdates.googleUid = uid;
+          if (photoValue && !existing.photoURL) linkUpdates.photoURL = photoValue;
+          if (nameValue && (!existing.name || existing.name === 'Google User')) {
+            linkUpdates.name = nameValue;
+          }
+          if (Object.keys(linkUpdates).length > 1) {
+            await usersCollection.updateOne(
+              { _id: existing._id },
+              { $set: linkUpdates }
+            );
+            existing = await usersCollection.findOne({ _id: existing._id });
+          }
+          setAuthCookie(res, existing);
+          return res.send(sanitizeUser(existing));
+        }
+      }
+      console.error('Google auth error:', err);
+      res.status(500).send({ message: 'Google sign-in failed. Please try again.' });
+    }
+  }));
+
+  app.get('/auth/me', authMiddleware, asyncHandler(async (req, res) => {
+    const user = await findUserById(usersCollection, req.user.id);
+    if (!user) {
+      return res.status(404).send({ message: 'User not found.' });
+    }
+    res.send(sanitizeUser(user));
+  }));
+
+  app.patch('/auth/me', authMiddleware, asyncHandler(async (req, res) => {
+    const existingUser = await findUserById(usersCollection, req.user.id);
+    if (!existingUser) {
+      return res.status(404).send({ message: 'User not found.' });
+    }
+    const userId = existingUser._id;
+
+    const { name, photoURL } = req.body;
+    const updates = {};
+
+    if (typeof name === 'string' && name.trim()) {
+      updates.name = name.trim();
+    }
+
+    if (typeof photoURL === 'string') {
+      updates.photoURL = photoURL.trim() || null;
+    }
+
+    if (!Object.keys(updates).length) {
+      return res.status(400).send({ message: 'No profile updates provided.' });
+    }
+
+    updates.updatedAt = new Date();
+
+    await usersCollection.updateOne({ _id: userId }, { $set: updates });
+
+    const user = await usersCollection.findOne({ _id: userId });
+    if (!user) {
+      return res.status(404).send({ message: 'User not found.' });
+    }
+    res.send(sanitizeUser(user));
+  }));
+
+  app.post('/auth/set-password', authMiddleware, asyncHandler(async (req, res) => {
+    const { password } = req.body;
+    if (!password || typeof password !== 'string') {
+      return res.status(400).send({ message: 'Password is required.' });
+    }
+
+    const passwordError = validatePasswordRules(password);
+    if (passwordError) {
+      return res.status(400).send({ message: passwordError });
+    }
+
+    const user = await findUserById(usersCollection, req.user.id);
+    if (!user) {
+      return res.status(404).send({ message: 'User not found.' });
+    }
+    const userId = user._id;
+    if (hasPasswordHash(user)) {
+      return res.status(400).send({ message: 'Password already set. Use login to sign in.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await usersCollection.updateOne(
+      { _id: userId },
+      { $set: { passwordHash, updatedAt: new Date() } }
+    );
+
+    const updated = await usersCollection.findOne({ _id: userId });
+    res.send(sanitizeUser(updated));
+  }));
 
   app.listen(port, '0.0.0.0', () => {
     console.log(`Server is running on port ${port}`);
