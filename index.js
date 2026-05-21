@@ -701,6 +701,83 @@ async function start() {
     res.send(sanitizeUser(updated));
   }));
 
+  const createBookingHandler = asyncHandler(async (req, res) => {
+    const { roomId, startAt, endAt, purpose, notes } = req.body;
+
+    if (!roomId || !startAt || !endAt) {
+      return res
+        .status(400)
+        .send({ message: 'Room, start time, and end time are required.' });
+    }
+
+    const room = await findRoomById(roomsCollection, roomId);
+    if (!room) {
+      return res.status(404).send({ message: 'Room not found.' });
+    }
+
+    const startDate = parseDate(startAt);
+    const endDate = parseDate(endAt);
+    if (!startDate || !endDate || endDate <= startDate) {
+      return res
+        .status(400)
+        .send({ message: 'Provide a valid booking time range.' });
+    }
+
+    const conflict = await bookingsCollection.findOne({
+      roomId,
+      status: { $ne: 'cancelled' },
+      $or: [
+        { startAt: { $gte: startDate, $lte: endDate } },
+        { endAt: { $gte: startDate, $lte: endDate } },
+        {
+          $and: [
+            { startAt: { $lte: startDate } },
+            { endAt: { $gte: endDate } },
+          ],
+        },
+      ],
+    });
+
+    if (conflict) {
+      return res
+        .status(409)
+        .send({ message: 'This room is already booked for that time.' });
+    }
+
+    const userId = req.user.id;
+    const purposeValue = typeof purpose === 'string' ? purpose.trim() : '';
+    const notesValue = typeof notes === 'string' ? notes.trim() : '';
+
+    const booking = {
+      roomId,
+      roomName: room.name || room.roomName || 'Study Room',
+      roomImage: room.image || '',
+      startAt: startDate,
+      endAt: endDate,
+      purpose: purposeValue,
+      notes: notesValue,
+      userId,
+      status: 'confirmed',
+      createdAt: new Date(),
+    };
+
+    const result = await bookingsCollection.insertOne(booking);
+    const bookingId = result.insertedId.toString();
+
+    await Promise.all([
+      roomsCollection.updateOne({ _id: room._id }, { $inc: { bookingCount: 1 } }),
+      usersCollection.updateOne(
+        { _id: new ObjectId(userId) },
+        { $push: { bookings: bookingId } }
+      ),
+    ]);
+
+    res.status(201).send({ ...booking, _id: result.insertedId });
+  });
+
+  app.post('/bookings', authMiddleware, createBookingHandler);
+  app.post('/api/bookings', authMiddleware, createBookingHandler);
+
   app.listen(port, '0.0.0.0', () => {
     console.log(`Server is running on port ${port}`);
   });
