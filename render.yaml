@@ -1,0 +1,23 @@
+# Render Blueprint — import in Render Dashboard → New → Blueprint
+services:
+  - type: web
+    name: studynook-api
+    runtime: node
+    plan: free
+    rootDir: .
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CLIENT_ORIGIN
+        sync: false
+      - key: DB_NAME
+        value: StudyNook

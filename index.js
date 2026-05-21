@@ -778,6 +778,102 @@ async function start() {
   app.post('/bookings', authMiddleware, createBookingHandler);
   app.post('/api/bookings', authMiddleware, createBookingHandler);
 
+  const getMyBookingsHandler = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const bookings = await bookingsCollection
+      .find({ userId })
+      .sort({ startAt: -1 })
+      .toArray();
+
+    const roomIds = [
+      ...new Set(
+        bookings
+          .map((b) => (b.roomId !== undefined && b.roomId !== null ? String(b.roomId) : ''))
+          .filter(Boolean)
+      ),
+    ];
+
+    const rooms = roomIds.length
+      ? await roomsCollection.find({ _id: { $in: roomIds } }).toArray()
+      : [];
+    const imageByRoomId = Object.fromEntries(
+      rooms.map((r) => [String(r._id), r.image || ''])
+    );
+
+    res.send(
+      bookings.map((b) => ({
+        ...b,
+        roomImage: b.roomImage || imageByRoomId[b.roomId] || '',
+      }))
+    );
+  });
+
+  app.get('/bookings/my', authMiddleware, getMyBookingsHandler);
+  app.get('/api/bookings/my', authMiddleware, getMyBookingsHandler);
+
+  const cancelBookingHandler = asyncHandler(async (req, res) => {
+    const bookingId = parseObjectId(req.params.id);
+    if (!bookingId) {
+      return res.status(400).send({ message: 'Invalid booking id.' });
+    }
+
+    const booking = await bookingsCollection.findOne({ _id: bookingId });
+    if (!booking) {
+      return res.status(404).send({ message: 'Booking not found.' });
+    }
+    const userId = req.user.id;
+    if (booking.userId !== userId) {
+      return res.status(403).send({ message: 'You can only cancel your own bookings.' });
+    }
+    if (booking.status === 'cancelled') {
+      return res.status(400).send({ message: 'Booking is already cancelled.' });
+    }
+
+    await bookingsCollection.updateOne(
+      { _id: bookingId },
+      { $set: { status: 'cancelled', cancelledAt: new Date() } }
+    );
+
+    const room = await findRoomById(roomsCollection, booking.roomId);
+    const updates = [
+      usersCollection.updateOne(
+        { _id: new ObjectId(userId) },
+        { $pull: { bookings: bookingId.toString() } }
+      ),
+    ];
+    if (room) {
+      updates.push(
+        roomsCollection.updateOne({ _id: room._id }, { $inc: { bookingCount: -1 } })
+      );
+    }
+    await Promise.all(updates);
+
+    res.send({ message: 'Booking cancelled.' });
+  });
+
+  app.patch('/bookings/:id/cancel', authMiddleware, cancelBookingHandler);
+  app.patch('/api/bookings/:id/cancel', authMiddleware, cancelBookingHandler);
+
+  app.use((err, req, res, next) => {
+    console.error('API error:', err);
+    if (res.headersSent) {
+      return next(err);
+    }
+    const status =
+      err?.status ||
+      err?.statusCode ||
+      (err?.code === 11000 ? 409 : 500);
+
+    const message =
+      status === 409
+        ? 'Duplicate key error.'
+        : status >= 400 && status < 500 && err?.message
+          ? err.message
+          : 'Internal server error.';
+
+    res.status(status).send({ message });
+  });
+
   app.listen(port, '0.0.0.0', () => {
     console.log(`Server is running on port ${port}`);
   });
