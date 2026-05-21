@@ -312,6 +312,24 @@ async function start() {
   app.get('/rooms', handleRoomsList);
   app.get('/api/rooms', handleRoomsList);
 
+  const getMyRoomsHandler = asyncHandler(async (req, res) => {
+    const userId = String(req.user.id).trim();
+    const ownerFilter = { $or: [{ createdBy: userId }] };
+    const objectId = parseObjectId(userId);
+    if (objectId) {
+      ownerFilter.$or.push({ createdBy: objectId });
+    }
+    const rooms = await roomsCollection
+      .find(ownerFilter)
+      .sort({ createdAt: -1 })
+      .toArray();
+    res.send(rooms);
+  });
+
+  // Register /mine before /:id — otherwise Express treats "mine" as a room id.
+  app.get('/rooms/mine', authMiddleware, getMyRoomsHandler);
+  app.get('/api/rooms/mine', authMiddleware, getMyRoomsHandler);
+
   const getRoomById = asyncHandler(async (req, res) => {
     const room = await findRoomById(roomsCollection, req.params.id);
     if (!room) {
@@ -322,22 +340,6 @@ async function start() {
 
   app.get('/rooms/:id', getRoomById);
   app.get('/api/rooms/:id', getRoomById);
-
-  app.get('/rooms/mine', authMiddleware, asyncHandler(async (req, res) => {
-    const rooms = await roomsCollection
-      .find({ createdBy: req.user.id })
-      .sort({ createdAt: -1 })
-      .toArray();
-    res.send(rooms);
-  }));
-
-  app.get('/api/rooms/mine', authMiddleware, asyncHandler(async (req, res) => {
-    const rooms = await roomsCollection
-      .find({ createdBy: req.user.id })
-      .sort({ createdAt: -1 })
-      .toArray();
-    res.send(rooms);
-  }));
 
   const createRoomHandler = asyncHandler(async (req, res) => {
     const {
