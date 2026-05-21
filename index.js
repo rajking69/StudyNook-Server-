@@ -244,6 +244,84 @@ async function start() {
     res.send('StudyNook API is running');
   });
 
+  const buildRoomsQuery = (query) => {
+    const filters = [];
+
+    const search = typeof query.search === 'string' ? query.search.trim() : '';
+    if (search) {
+      const safe = escapeRegex(search);
+      filters.push({
+        $or: [
+          { name: { $regex: safe, $options: 'i' } },
+          { roomName: { $regex: safe, $options: 'i' } },
+        ],
+      });
+    }
+
+    const amenitiesParam = typeof query.amenities === 'string' ? query.amenities : '';
+    const amenities = amenitiesParam
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (amenities.length) {
+      filters.push({
+        $or: [
+          { amenities: { $in: amenities } },
+          { features: { $in: amenities } },
+        ],
+      });
+    }
+
+    const floor = typeof query.floor === 'string' ? query.floor.trim() : '';
+    if (floor) {
+      const safe = escapeRegex(floor);
+      filters.push({
+        $or: [
+          { location: { $regex: safe, $options: 'i' } },
+          { floor: { $regex: safe, $options: 'i' } },
+        ],
+      });
+    }
+
+    const minRate = parseNumber(query.minRate);
+    const maxRate = parseNumber(query.maxRate);
+    if (minRate !== null || maxRate !== null) {
+      const range = {};
+      if (minRate !== null) range.$gte = minRate;
+      if (maxRate !== null) range.$lte = maxRate;
+      filters.push({
+        $or: [{ pricePerHour: range }, { hourlyRate: range }],
+      });
+    }
+
+    return filters.length ? { $and: filters } : {};
+  };
+
+  const handleRoomsList = asyncHandler(async (req, res) => {
+    const parsedLimit = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(parsedLimit) ? parsedLimit : 0;
+    const sort = req.query.sort === 'latest'
+      ? { createdAt: -1 }
+      : { name: 1 };
+    const query = buildRoomsQuery(req.query);
+    const rooms = await roomsCollection.find(query).sort(sort).limit(limit).toArray();
+    res.send(rooms);
+  });
+
+  app.get('/rooms', handleRoomsList);
+  app.get('/api/rooms', handleRoomsList);
+
+  const getRoomById = asyncHandler(async (req, res) => {
+    const room = await findRoomById(roomsCollection, req.params.id);
+    if (!room) {
+      return res.status(404).send({ message: 'Room not found.' });
+    }
+    res.send(room);
+  });
+
+  app.get('/rooms/:id', getRoomById);
+  app.get('/api/rooms/:id', getRoomById);
+
   app.listen(port, '0.0.0.0', () => {
     console.log(`Server is running on port ${port}`);
   });
