@@ -2,6 +2,7 @@ const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
+const { MongoClient, ServerApiVersion } = require('mongodb');
 
 dotenv.config();
 
@@ -26,10 +27,63 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
-app.get('/', (req, res) => {
-  res.send('StudyNook API is running');
+const uri = process.env.MONGODB_URI;
+if (!uri) {
+  console.error('Missing MONGODB_URI environment variable.');
+  process.exit(1);
+}
+
+const client = new MongoClient(uri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
 });
 
-app.listen(port, '0.0.0.0', () => {
-  console.log(`Server is running on port ${port}`);
+async function start() {
+  await client.connect();
+  const db = client.db(process.env.DB_NAME || 'StudyNook');
+  const roomsCollection = db.collection(process.env.ROOMS_COLLECTION || 'rooms');
+  const usersCollection = db.collection('users');
+  const bookingsCollection = db.collection(process.env.BOOKINGS_COLLECTION || 'bookings');
+
+  await roomsCollection.createIndex({ name: 1 });
+  await bookingsCollection.createIndex({ roomId: 1, startAt: 1, endAt: 1 });
+  await usersCollection.createIndex({ email: 1 }, { unique: true });
+
+  await roomsCollection.updateMany(
+    { bookingCount: { $exists: false } },
+    { $set: { bookingCount: 0 } }
+  );
+  await roomsCollection.updateMany(
+    { roomName: { $exists: true }, name: { $exists: false } },
+    [
+      {
+        $set: {
+          name: '$roomName',
+          location: '$floor',
+          pricePerHour: '$hourlyRate',
+          bookingCount: { $ifNull: ['$bookingCount', 0] },
+        },
+      },
+    ]
+  );
+  await usersCollection.updateMany(
+    { bookings: { $exists: false } },
+    { $set: { bookings: [] } }
+  );
+
+  app.get('/', (req, res) => {
+    res.send('StudyNook API is running');
+  });
+
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`Server is running on port ${port}`);
+  });
+}
+
+start().catch((err) => {
+  console.error('Failed to start server', err);
+  process.exit(1);
 });
