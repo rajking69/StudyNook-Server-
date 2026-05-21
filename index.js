@@ -322,6 +322,146 @@ async function start() {
   app.get('/rooms/:id', getRoomById);
   app.get('/api/rooms/:id', getRoomById);
 
+  app.get('/rooms/mine', authMiddleware, asyncHandler(async (req, res) => {
+    const rooms = await roomsCollection
+      .find({ createdBy: req.user.id })
+      .sort({ createdAt: -1 })
+      .toArray();
+    res.send(rooms);
+  }));
+
+  app.get('/api/rooms/mine', authMiddleware, asyncHandler(async (req, res) => {
+    const rooms = await roomsCollection
+      .find({ createdBy: req.user.id })
+      .sort({ createdAt: -1 })
+      .toArray();
+    res.send(rooms);
+  }));
+
+  const createRoomHandler = asyncHandler(async (req, res) => {
+    const {
+      name,
+      capacity,
+      location,
+      description,
+      features,
+      image,
+      pricePerHour,
+      noiseLevel,
+      amenities,
+    } = req.body;
+
+    const nameValue = typeof name === 'string' ? name.trim() : '';
+    const locationValue = typeof location === 'string' ? location.trim() : '';
+    const imageValue = typeof image === 'string' ? image.trim() : '';
+    const descriptionValue = typeof description === 'string' ? description.trim() : '';
+    const capacityValue = parseNumber(capacity);
+    const priceValue = parseNumber(pricePerHour);
+    const noiseValue = typeof noiseLevel === 'string' && noiseLevel.trim()
+      ? noiseLevel.trim()
+      : 'Quiet';
+
+    if (!nameValue || !locationValue) {
+      return res
+        .status(400)
+        .send({ message: 'Room name and location are required.' });
+    }
+    if (!imageValue) {
+      return res.status(400).send({ message: 'Room image URL is required.' });
+    }
+
+    const room = {
+      name: nameValue,
+      capacity: capacityValue,
+      location: locationValue,
+      description: descriptionValue,
+      features: Array.isArray(features) ? features : [],
+      amenities: Array.isArray(amenities) ? amenities : [],
+      noiseLevel: noiseValue,
+      image: imageValue,
+      pricePerHour: priceValue,
+      bookingCount: 0,
+      createdAt: new Date(),
+      createdBy: req.user.id,
+    };
+
+    const result = await roomsCollection.insertOne(room);
+    res.status(201).send({ ...room, _id: result.insertedId });
+  });
+
+  app.post('/rooms', authMiddleware, createRoomHandler);
+  app.post('/api/rooms', authMiddleware, createRoomHandler);
+
+  const updateRoomHandler = asyncHandler(async (req, res) => {
+    const existing = await findRoomById(roomsCollection, req.params.id);
+    if (!existing) {
+      return res.status(404).send({ message: 'Room not found.' });
+    }
+    if (!ownerIdMatches(existing.createdBy, req.user.id)) {
+      return res.status(403).send({ message: 'You are not the owner of this room.' });
+    }
+
+    const {
+      name, capacity, location, description,
+      features, image, pricePerHour, noiseLevel, amenities,
+    } = req.body;
+
+    const updates = { updatedAt: new Date() };
+
+    if (typeof name === 'string') {
+      updates.name = name.trim();
+    }
+    if (typeof location === 'string') {
+      updates.location = location.trim();
+    }
+    if (typeof description === 'string') {
+      updates.description = description.trim();
+    }
+    if (typeof image === 'string') {
+      updates.image = image.trim();
+    }
+    if (capacity !== undefined) {
+      updates.capacity = parseNumber(capacity);
+    }
+    if (pricePerHour !== undefined) {
+      updates.pricePerHour = parseNumber(pricePerHour);
+    }
+    if (typeof noiseLevel === 'string') {
+      updates.noiseLevel = noiseLevel.trim() || 'Quiet';
+    }
+    if (Array.isArray(features)) {
+      updates.features = features;
+    }
+    if (Array.isArray(amenities)) {
+      updates.amenities = amenities;
+    }
+
+    await roomsCollection.updateOne({ _id: existing._id }, { $set: updates });
+    const updated = await roomsCollection.findOne({ _id: existing._id });
+    res.send(updated);
+  });
+
+  app.put('/rooms/:id', authMiddleware, updateRoomHandler);
+  app.put('/api/rooms/:id', authMiddleware, updateRoomHandler);
+
+  const deleteRoomHandler = asyncHandler(async (req, res) => {
+    const existing = await findRoomById(roomsCollection, req.params.id);
+    if (!existing) {
+      return res.status(404).send({ message: 'Room not found.' });
+    }
+    if (!ownerIdMatches(existing.createdBy, req.user.id)) {
+      return res.status(403).send({ message: 'You are not the owner of this room.' });
+    }
+
+    const roomIdKey = String(existing._id);
+    await bookingsCollection.deleteMany({ roomId: roomIdKey });
+    await roomsCollection.deleteOne({ _id: existing._id });
+    res.send({ message: 'Room deleted successfully.' });
+  });
+
+  app.delete('/rooms/:id', authMiddleware, deleteRoomHandler);
+  app.delete('/api/rooms/:id', authMiddleware, deleteRoomHandler);
+
   app.listen(port, '0.0.0.0', () => {
     console.log(`Server is running on port ${port}`);
   });
