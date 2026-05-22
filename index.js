@@ -4,7 +4,7 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const { jwtVerify, createRemoteJWKSet } = require('jose');
+const { jwtVerify, createRemoteJWKSet } = require('jose-cjs');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 dotenv.config();
