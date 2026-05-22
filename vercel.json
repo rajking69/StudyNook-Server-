@@ -1,0 +1,11 @@
+{
+  "experimentalServices": {
+    "studynook-api": {
+      "type": "web",
+      "framework": "express",
+      "entrypoint": "index.js",
+      "routePrefix": "/",
+      "buildCommand": "npm install"
+    }
+  }
+}

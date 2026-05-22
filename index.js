@@ -979,12 +979,21 @@ async function start() {
     res.status(status).send({ message });
   });
 
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`Server is running on port ${port}`);
-  });
+  if (!process.env.VERCEL) {
+    app.listen(port, '0.0.0.0', () => {
+      console.log(`Server is running on port ${port}`);
+    });
+  }
+  return app;
 }
 
-start().catch((err) => {
-  console.error('Failed to start server', err);
-  process.exit(1);
-});
+const isVercel = Boolean(process.env.VERCEL);
+
+if (isVercel) {
+  module.exports = start();
+} else {
+  start().catch((err) => {
+    console.error('Failed to start server', err);
+    process.exit(1);
+  });
+}
