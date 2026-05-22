@@ -4,6 +4,7 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
+const { jwtVerify, createRemoteJWKSet } = require('jose');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 dotenv.config();
@@ -39,6 +40,23 @@ const jwtSecret = process.env.JWT_SECRET || 'dev-secret-change-me';
 if (jwtSecret === 'dev-secret-change-me') {
   console.warn('Warning: JWT_SECRET is not set. Using a development fallback.');
 }
+
+const betterAuthBaseUrl = (
+  process.env.BETTER_AUTH_URL ||
+  process.env.CLIENT_ORIGIN ||
+  'http://localhost:3000'
+).replace(/\/$/, '');
+
+let betterAuthJwks = null;
+
+const getBetterAuthJwks = () => {
+  if (!betterAuthJwks) {
+    betterAuthJwks = createRemoteJWKSet(
+      new URL(`${betterAuthBaseUrl}/api/auth/jwks`)
+    );
+  }
+  return betterAuthJwks;
+};
 
 if (isProduction) {
   console.log('Production mode: auth cookies use secure=true (HTTPS required).');
@@ -142,28 +160,110 @@ const findUserById = async (collection, idValue) => {
   return collection.findOne({ _id: idString });
 };
 
-/**
- * Reads req.cookies.token, verifies JWT, sets req.user = { id: userId }.
- * Private routes: add/list/edit/delete rooms, bookings, cancel, /auth/me, etc.
- */
-const authMiddleware = (req, res, next) => {
-  const token = req.cookies?.token;
-  if (!token || typeof token !== 'string') {
-    return res.status(401).send({ message: 'Unauthorized' });
+const extractBearerToken = (req) => {
+  const header = req.headers.authorization;
+  if (typeof header === 'string' && header.startsWith('Bearer ')) {
+    return header.slice(7).trim();
+  }
+  return null;
+};
+
+/** Challenge 7.1 — Express JWT from httpOnly `token` cookie. */
+const verifyExpressJwt = (token) => {
+  const decoded = jwt.verify(token, jwtSecret);
+  const userId = decoded?.userId;
+  if (!userId || typeof userId !== 'string') {
+    return null;
+  }
+  return userId;
+};
+
+/** Better Auth JWT plugin — verified via JWKS (no DB hit). */
+const verifyBetterAuthJwt = async (token) => {
+  const { payload } = await jwtVerify(token, getBetterAuthJwks(), {
+    issuer: betterAuthBaseUrl,
+    audience: betterAuthBaseUrl,
+  });
+  return payload;
+};
+
+const resolveExpressUserId = async (payload, usersCollection) => {
+  if (!payload || typeof payload !== 'object') {
+    return null;
   }
 
-  try {
-    const decoded = jwt.verify(token, jwtSecret);
-    const userId = decoded?.userId;
-    if (!userId || typeof userId !== 'string') {
-      return res.status(401).send({ message: 'Unauthorized' });
+  const email =
+    typeof payload.email === 'string' ? payload.email.trim().toLowerCase() : '';
+  if (email) {
+    const byEmail = await usersCollection.findOne({ email });
+    if (byEmail?._id != null) {
+      return String(byEmail._id);
     }
-    req.user = { id: userId };
-    return next();
-  } catch {
+  }
+
+  const idCandidates = [payload.userId, payload.sub, payload.id].filter(Boolean);
+  for (const candidate of idCandidates) {
+    const user = await findUserById(usersCollection, candidate);
+    if (user?._id != null) {
+      return String(user._id);
+    }
+  }
+
+  return null;
+};
+
+/**
+ * Auth middleware: verify Express `token` cookie and/or Bearer JWT.
+ * 1) httpOnly cookie `token` (Express JWT, Challenge 7.1)
+ * 2) Authorization: Bearer <Express JWT | Better Auth JWT>
+ */
+const createAuthMiddleware = (usersCollection) => async (req, res, next) => {
+  try {
+    const cookieToken = req.cookies?.token;
+    if (cookieToken && typeof cookieToken === 'string') {
+      try {
+        const userId = verifyExpressJwt(cookieToken);
+        if (userId) {
+          req.user = { id: userId };
+          return next();
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+
+    const bearerToken = extractBearerToken(req);
+    if (bearerToken) {
+      try {
+        const userId = verifyExpressJwt(bearerToken);
+        if (userId) {
+          req.user = { id: userId };
+          return next();
+        }
+      } catch {
+        /* not an Express JWT — try Better Auth */
+      }
+
+      try {
+        const payload = await verifyBetterAuthJwt(bearerToken);
+        const userId = await resolveExpressUserId(payload, usersCollection);
+        if (userId) {
+          req.user = { id: userId };
+          return next();
+        }
+      } catch {
+        /* invalid Better Auth JWT */
+      }
+    }
+
     return res.status(401).send({ message: 'Unauthorized' });
+  } catch (err) {
+    return next(err);
   }
 };
+
+let authMiddleware = (req, res, next) =>
+  res.status(503).send({ message: 'Server is starting.' });
 
 const parseDate = (value) => {
   const parsed = new Date(value);
@@ -214,6 +314,9 @@ async function start() {
   const roomsCollection = db.collection(process.env.ROOMS_COLLECTION || 'rooms');
   const usersCollection = db.collection('users');
   const bookingsCollection = db.collection(process.env.BOOKINGS_COLLECTION || 'bookings');
+
+  authMiddleware = createAuthMiddleware(usersCollection);
+  console.log(`Auth: Express JWT cookie + Bearer (JWKS ${betterAuthBaseUrl}/api/auth/jwks)`);
 
   await roomsCollection.createIndex({ name: 1 });
   await bookingsCollection.createIndex({ roomId: 1, startAt: 1, endAt: 1 });
